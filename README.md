@@ -234,6 +234,73 @@ print(json.load(urllib.request.urlopen(req)))
 # {'results': {'A1': 10, 'A2': 20, 'B1': 20, 'B2': 40}}
 ```
 
+### `POST /goal-seek`（单变量整数求解）
+
+只允许调整一个**已提供的整数格** `variable`，求它取哪个整数时，**已提供**的
+目标格 `target` 恰好等于整数 `desired`。服务沿 target 的引用链把每个格符号化
+为 `a×variable+b`（只调整 variable 本身）：加减逐项合并系数；一元正负号传播到
+`a`、`b`；乘法要求至少一侧不含 variable（`(a₁x+b₁)(a₂x+b₂)` 中 `a₁`、`a₂`
+都非零即非线性，返回 `422`）；`SUM` 逐格相加；缺格按 `0` 计算。
+
+```bash
+curl -X POST http://localhost:8000/goal-seek \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "cells": {
+      "A1": 0,
+      "A2": 10,
+      "B1": "=A1-1",
+      "C1": "=SUM(A1:A3)+B1"
+    },
+    "variable": "A1",
+    "target": "C1",
+    "desired": 19
+  }'
+```
+
+上例中 `C1 = A1 + 10 + 0 + (A1-1) = 2·A1 + 9`，令其等于 19 得到 `A1 = 5`：
+
+```json
+{ "status": "unique", "value": 5 }
+```
+
+- `unique`：`a ≠ 0` 且 `desired - b` 能被 `a` 整除，`value` 为唯一整数解
+  （可以为负数或 `0`）；
+- `none`：`a ≠ 0` 但不能整除（无整数解），或 `a = 0` 且 `b ≠ desired`
+  （目标与 variable 无关且恒不等于期望值），`value` 为 `null`；
+- `any`：`a = 0` 且 `b = desired`（任意整数都满足），`value` 为 `null`。
+
+以下情况返回 HTTP `422`：
+
+- `variable` / `target` 地址非法，或未在 `cells` 中提供（缺格）；
+- `variable` 是公式（含语法错误的公式也不行）——只能调整整数格；
+- target 引用链上出现 `SYNTAX` 或 `CYCLE`（按 `/evaluate` 的现有规则判定，
+  语法错误优先）；**链外的错误格不影响求解**；
+- 乘法两侧系数都非零（目标不是 variable 的一次函数）；
+- `cells` 未通过与 `/evaluate` 相同的输入校验；`desired` 必须是整数。
+
+Python 调用示例：
+
+```python
+import json
+import urllib.request
+
+payload = {
+    "cells": {"A1": 0, "B1": "=2*A1+3"},
+    "variable": "A1",
+    "target": "B1",
+    "desired": 11,
+}
+req = urllib.request.Request(
+    "http://localhost:8000/goal-seek",
+    data=json.dumps(payload).encode(),
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+print(json.load(urllib.request.urlopen(req)))
+# {'status': 'unique', 'value': 4}
+```
+
 ## API 说明
 
 ### `POST /evaluate`
@@ -309,6 +376,40 @@ print(json.load(urllib.request.urlopen(req)))
 
 越界或超长时整次请求失败，**不会产生部分更新**。
 
+### `POST /goal-seek`
+
+请求体：
+
+```json
+{
+  "cells": { "A1": 0, "B1": "=2*A1+3" },
+  "variable": "A1",
+  "target": "B1",
+  "desired": 11
+}
+```
+
+- `cells`：与 `POST /evaluate` 相同（同样的校验规则）。
+- `variable`：允许调整的格子，地址大小写不敏感；必须是 `cells` 中**已提供的
+  整数格**（公式格返回 `422`）。
+- `target`：被驱动的目标格，必须是 `cells` 中**已提供**的格子（整数或公式）。
+- `desired`：希望 target 等于的**整数**。
+
+响应体：
+
+```json
+{ "status": "unique", "value": 4 }
+```
+
+- `status` 取值：
+  - `"unique"`：唯一整数解，`value` 为该整数；
+  - `"none"`：无整数解（不能整除，或目标恒为不等于 `desired` 的常量），
+    `value` 为 `null`；
+  - `"any"`：目标恒等于 `desired`，任意整数都满足，`value` 为 `null`。
+- target 沿引用链被符号计算为 `a×variable+b`：加减合并系数，一元正负号传播
+  系数，`SUM` 逐格相加，缺格按 `0`；乘法两侧系数都非零时返回 `422`。
+- target 的引用链含 `SYNTAX` 或 `CYCLE` 时返回 `422`，链外错误忽略。
+
 ## 本地开发（不使用 Docker）
 
 需要 Python 3.11+：
@@ -345,3 +446,9 @@ pytest -q
   **同一份原公式文本**按行列位移替换这些区间（其余字符逐字保留），引用重写为
   大写规范地址。所有新公式先全部生成并通过越界/长度检查，再统一覆盖写入，
   因此失败时不会输出部分结果。
+- `app/goalseek.py`：`/goal-seek` 单变量求解。先用与 `/evaluate` 完全相同的
+  规则解析并判定 target 的引用链是否含 `SYNTAX` / `CYCLE`（链外错误不影响）；
+  再把 variable 视为符号 `x`，用显式工作栈把链上每格迭代地求值为整数系数的
+  一次式 `(a, b)`（加减、一元正负号、`SUM`、缺格按 0 均与普通求值同规则；
+  乘法两侧系数都非零时以 `422` 拒绝），最后精确解 `a·x+b=desired`：整除得
+  `unique`，不整除或常量不符得 `none`，常量相符得 `any`。

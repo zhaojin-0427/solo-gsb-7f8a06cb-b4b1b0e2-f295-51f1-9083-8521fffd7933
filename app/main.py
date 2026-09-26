@@ -15,6 +15,7 @@ from .engine import (
     repair_cycles,
 )
 from .fill import FillFormulaError, fill_formula
+from .goalseek import GoalSeekError, goal_seek
 
 app = FastAPI(
     title="Spreadsheet Formula Evaluator",
@@ -90,6 +91,33 @@ class FillFormulaResponse(BaseModel):
     cells: Dict[str, CellValue]
 
 
+class GoalSeekRequest(EvaluateRequest):
+    # Inherits the cells field and all of its validators.
+    variable: str = Field(
+        description="Address of the provided integer cell allowed to change."
+    )
+    target: str = Field(
+        description="Address of the provided cell whose value is driven."
+    )
+    desired: int = Field(description="Integer value the target cell should equal.")
+
+    @field_validator("desired", mode="before")
+    @classmethod
+    def _reject_desired_non_int(cls, v):
+        # bool is a subclass of int: reject it (and floats) before coercion.
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise ValueError("desired must be an integer")
+        return v
+
+
+class GoalSeekResponse(BaseModel):
+    status: str = Field(
+        description="One of 'unique' (value holds the integer solution), "
+        "'none' (no integer solution) or 'any' (every integer works)."
+    )
+    value: Union[int, None] = None
+
+
 @app.get("/")
 def root() -> Dict[str, str]:
     return {"service": "spreadsheet-evaluator", "status": "ok"}
@@ -150,3 +178,19 @@ def fill(request: FillFormulaRequest) -> FillFormulaResponse:
     except FillFormulaError as exc:
         raise HTTPException(status_code=422, detail=exc.args[0])
     return FillFormulaResponse(cells=cells)
+
+
+@app.post("/goal-seek", response_model=GoalSeekResponse)
+def goal_seek_endpoint(request: GoalSeekRequest) -> GoalSeekResponse:
+    try:
+        status, value = goal_seek(
+            request.cells, request.variable, request.target, request.desired
+        )
+    except InvalidCellKey as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid cell key {str(exc)!r}; expected A1-style address",
+        )
+    except GoalSeekError as exc:
+        raise HTTPException(status_code=422, detail=exc.args[0])
+    return GoalSeekResponse(status=status, value=value)
