@@ -249,3 +249,198 @@ class TestCycleRepair:
         ):
             resp = client.post("/cycle-repair", json={"cells": bad})
             assert resp.status_code == 422
+
+
+class TestGoalSeek:
+    def _post(self, payload):
+        return client.post("/goal-seek", json=payload)
+
+    def test_unique_solution(self):
+        resp = self._post(
+            {
+                "cells": {"A1": 1, "B1": "=A1*2", "C1": "=SUM(A1:B1)+1"},
+                "variable": "A1",
+                "target": "C1",
+                "desired": 10,
+            }
+        )
+        assert resp.status_code == 200
+        # C1 = 3*A1 + 1 = 10 -> A1 = 3.
+        assert resp.json() == {"status": "unique", "value": 3}
+
+    def test_none_status(self):
+        resp = self._post(
+            {
+                "cells": {"A1": 1, "B1": "=A1*2"},
+                "variable": "A1",
+                "target": "B1",
+                "desired": 3,
+            }
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "none", "value": None}
+
+    def test_any_status(self):
+        resp = self._post(
+            {
+                "cells": {"A1": 5, "B1": 10},
+                "variable": "A1",
+                "target": "B1",
+                "desired": 10,
+            }
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "any", "value": None}
+
+    def test_lowercase_addresses_canonicalised(self):
+        resp = self._post(
+            {
+                "cells": {"a1": 1, "b1": "=A1+1"},
+                "variable": "a1",
+                "target": "b1",
+                "desired": 6,
+            }
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "unique", "value": 5}
+
+    def test_off_chain_errors_do_not_block_solving(self):
+        resp = self._post(
+            {
+                "cells": {
+                    "A1": 1,
+                    "B1": "=A1+1",
+                    "C1": "=1+",
+                    "D1": "=D1",
+                },
+                "variable": "A1",
+                "target": "B1",
+                "desired": 5,
+            }
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "unique", "value": 4}
+
+    def test_syntax_on_chain_returns_422(self):
+        resp = self._post(
+            {
+                "cells": {"A1": 1, "B1": "=1+", "C1": "=A1+B1"},
+                "variable": "A1",
+                "target": "C1",
+                "desired": 4,
+            }
+        )
+        assert resp.status_code == 422
+
+    def test_cycle_on_chain_returns_422(self):
+        resp = self._post(
+            {
+                "cells": {"A1": 1, "B1": "=C1", "C1": "=B1", "D1": "=A1+B1"},
+                "variable": "A1",
+                "target": "D1",
+                "desired": 4,
+            }
+        )
+        assert resp.status_code == 422
+
+    def test_nonlinear_target_returns_422(self):
+        resp = self._post(
+            {
+                "cells": {"A1": 1, "B1": "=A1*A1"},
+                "variable": "A1",
+                "target": "B1",
+                "desired": 4,
+            }
+        )
+        assert resp.status_code == 422
+
+    def test_variable_must_be_integer_cell(self):
+        for cells in ({"A1": "=1", "B1": 2}, {"A1": "=1+", "B1": 2}):
+            resp = self._post(
+                {
+                    "cells": cells,
+                    "variable": "A1",
+                    "target": "B1",
+                    "desired": 2,
+                }
+            )
+            assert resp.status_code == 422
+
+    def test_missing_variable_or_target_returns_422(self):
+        resp = self._post(
+            {
+                "cells": {"B1": 1},
+                "variable": "A1",
+                "target": "B1",
+                "desired": 1,
+            }
+        )
+        assert resp.status_code == 422
+        resp = self._post(
+            {
+                "cells": {"A1": 1},
+                "variable": "A1",
+                "target": "B1",
+                "desired": 1,
+            }
+        )
+        assert resp.status_code == 422
+
+    def test_invalid_addresses_return_422(self):
+        base = {"cells": {"A1": 1, "B1": 2}, "desired": 2}
+        resp = self._post({**base, "variable": "nope", "target": "B1"})
+        assert resp.status_code == 422
+        resp = self._post({**base, "variable": "A1", "target": "A0"})
+        assert resp.status_code == 422
+        resp = self._post(
+            {
+                "cells": {"nope": 1, "A1": 1},
+                "variable": "A1",
+                "target": "A1",
+                "desired": 1,
+            }
+        )
+        assert resp.status_code == 422
+
+    def test_desired_must_be_an_integer(self):
+        base = {
+            "cells": {"A1": 1, "B1": "=A1"},
+            "variable": "A1",
+            "target": "B1",
+        }
+        for bad in (True, 1.5, "3", None):
+            resp = self._post({**base, "desired": bad})
+            assert resp.status_code == 422
+
+    def test_missing_fields_return_422(self):
+        cells = {"A1": 1, "B1": "=A1"}
+        resp = self._post(
+            {"cells": cells, "variable": "A1", "target": "B1"}
+        )
+        assert resp.status_code == 422
+        resp = self._post(
+            {"cells": cells, "variable": "A1", "desired": 1}
+        )
+        assert resp.status_code == 422
+        resp = self._post({"cells": cells, "target": "B1", "desired": 1})
+        assert resp.status_code == 422
+
+    def test_cells_validation_shared_with_evaluate(self):
+        for bad in (
+            {"A1": 1.5},
+            {"A1": True},
+            {"A1": "bare string"},
+        ):
+            resp = self._post(
+                {
+                    "cells": bad,
+                    "variable": "A1",
+                    "target": "A1",
+                    "desired": 1,
+                }
+            )
+            assert resp.status_code == 422
+
+    def test_openapi_lists_goal_seek(self):
+        paths = client.get("/openapi.json").json()["paths"]
+        assert "/goal-seek" in paths

@@ -234,6 +234,60 @@ print(json.load(urllib.request.urlopen(req)))
 # {'results': {'A1': 10, 'A2': 20, 'B1': 20, 'B2': 40}}
 ```
 
+### `POST /goal-seek`（单变量目标求解）
+
+只调整 `variable` 指定的**已提供整数格**，让 `target` 格的值精确等于整数
+`desired`。求解时沿 target 的引用链把目标值表示为 `a × variable + b`：
+
+```bash
+curl -X POST http://localhost:8000/goal-seek \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "cells": {
+      "A1": 1,
+      "B1": "=A1*2",
+      "C1": "=SUM(A1:B1)+1"
+    },
+    "variable": "A1",
+    "target": "C1",
+    "desired": 10
+  }'
+```
+
+```json
+{ "status": "unique", "value": 3 }
+```
+
+上例中 `C1 = 3×A1 + 1`，`desired = 10` 有唯一整数解 `A1 = 3`。
+
+- `status=unique`：存在唯一整数解，`value` 为 `variable` 应取的值。
+- `status=none`：无整数解（`a≠0` 但 `desired-b` 不能被 `a` 整除，或目标与
+  `variable` 无关且当前值不等于 `desired`），`value` 为 `null`。
+- `status=any`：目标与 `variable` 无关且当前值已等于 `desired`，任意整数都
+  满足，`value` 为 `null`。
+
+Python 调用示例：
+
+```python
+import json
+import urllib.request
+
+payload = {
+    "cells": {"A1": 1, "B1": "=A1*2", "C1": "=SUM(A1:B1)+1"},
+    "variable": "A1",
+    "target": "C1",
+    "desired": 10,
+}
+req = urllib.request.Request(
+    "http://localhost:8000/goal-seek",
+    data=json.dumps(payload).encode(),
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+print(json.load(urllib.request.urlopen(req)))
+# {'status': 'unique', 'value': 3}
+```
+
 ## API 说明
 
 ### `POST /evaluate`
@@ -309,6 +363,41 @@ print(json.load(urllib.request.urlopen(req)))
 
 越界或超长时整次请求失败，**不会产生部分更新**。
 
+### `POST /goal-seek`
+
+请求体：
+
+```json
+{
+  "cells": { "A1": 1, "B1": "=A1*2", "C1": "=SUM(A1:B1)+1" },
+  "variable": "A1",
+  "target": "C1",
+  "desired": 10
+}
+```
+
+- `cells`：与 `POST /evaluate` 相同（同样的校验规则）。
+- `variable`：唯一允许调整的格子地址（大小写不敏感），必须是**已提供的
+  整数格**。
+- `target`：目标格地址（大小写不敏感），必须已提供（整数或公式均可）。
+- `desired`：期望目标格达到的整数（布尔、浮点、字符串都返回 `422`）。
+
+响应体：
+
+```json
+{ "status": "unique", "value": 3 }
+```
+
+- `status` 为 `unique` / `none` / `any` 之一；`value` 仅在 `unique` 时为
+  整数解，其余情况为 `null`。
+- 求解沿 `target` 的引用链进行：`SUM` 逐格计入、缺格按 `0`（与求值一致）；
+  加减与一元正负号传播系数，乘法只允许一侧含 `variable`。
+- 以下情况返回 HTTP `422`：
+  - `variable` / `target` 地址非法、格子未提供，或 `variable` 是公式格；
+  - 目标引用链上存在 `SYNTAX` 或 `CYCLE` 格子（**链外错误不影响求解**）；
+  - 乘法两侧的系数都非零（目标不是 `variable` 的一次函数）；
+  - `cells` 未通过与 `/evaluate` 相同的输入校验。
+
 ## 本地开发（不使用 Docker）
 
 需要 Python 3.11+：
@@ -345,3 +434,10 @@ pytest -q
   **同一份原公式文本**按行列位移替换这些区间（其余字符逐字保留），引用重写为
   大写规范地址。所有新公式先全部生成并通过越界/长度检查，再统一覆盖写入，
   因此失败时不会输出部分结果。
+- `app/goal.py`：`/goal-seek` 单变量目标求解。沿 `target` 的引用链（仅已提供
+  格子，缺格按 `0`、`SUM` 逐格计入）做 Kahn 拓扑遍历，为链上每格维护系数对
+  `(a, b)`（表示“该格 = a×variable + b”）：`variable` 格为 `(1, 0)`，其余整数格
+  为 `(0, v)`；加减与一元正负号对应加减/取反系数对，乘法用一侧的常数缩放另一侧
+  （两侧 `a` 都非零则为二次项，返回 `422`）。链上出现 `SYNTAX` / `CYCLE` 即
+  `422`，链外错误不参与判断；最后在整数环上精确求解
+  `a×variable + b = desired`（整除判定，无浮点误差）。

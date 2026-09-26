@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Union
+from typing import Dict, List, Literal, Optional, Union
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    field_validator,
+)
 
 from .engine import (
     InvalidCellKey,
@@ -15,6 +21,7 @@ from .engine import (
     repair_cycles,
 )
 from .fill import FillFormulaError, fill_formula
+from .goal import GoalSeekError, goal_seek
 
 app = FastAPI(
     title="Spreadsheet Formula Evaluator",
@@ -90,6 +97,25 @@ class FillFormulaResponse(BaseModel):
     cells: Dict[str, CellValue]
 
 
+class GoalSeekRequest(EvaluateRequest):
+    # Inherits the cells field and all of its validators.
+    variable: str = Field(
+        description="Address of the provided integer cell to adjust."
+    )
+    target: str = Field(
+        description="Address of the provided cell whose value is driven to "
+        "the desired integer."
+    )
+    desired: StrictInt = Field(
+        description="Desired integer value of the target cell."
+    )
+
+
+class GoalSeekResponse(BaseModel):
+    status: Literal["unique", "none", "any"]
+    value: Optional[int]
+
+
 @app.get("/")
 def root() -> Dict[str, str]:
     return {"service": "spreadsheet-evaluator", "status": "ok"}
@@ -150,3 +176,19 @@ def fill(request: FillFormulaRequest) -> FillFormulaResponse:
     except FillFormulaError as exc:
         raise HTTPException(status_code=422, detail=exc.args[0])
     return FillFormulaResponse(cells=cells)
+
+
+@app.post("/goal-seek", response_model=GoalSeekResponse)
+def goal_seek_endpoint(request: GoalSeekRequest) -> GoalSeekResponse:
+    try:
+        status, value = goal_seek(
+            request.cells, request.variable, request.target, request.desired
+        )
+    except InvalidCellKey as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid cell key {str(exc)!r}; expected A1-style address",
+        )
+    except GoalSeekError as exc:
+        raise HTTPException(status_code=422, detail=exc.args[0])
+    return GoalSeekResponse(status=status, value=value)

@@ -106,6 +106,25 @@ def canonical_key(raw: str) -> str:
     return parsed[2]
 
 
+def _dependency_graph(parsed: ParsedCells) -> Dict[str, List[str]]:
+    """Edges from each provided cell to the *provided* cells it refers to.
+
+    Missing cells evaluate to zero and are not part of the graph; integer
+    literals and syntax-broken formulas have no outgoing edges.
+    """
+    deps: Dict[str, List[str]] = {}
+    for key, ast in parsed.asts.items():
+        if key in parsed.syntax_nodes or ast is None:
+            deps[key] = []
+        else:
+            deps[key] = [
+                ref
+                for ref in iter_references(ast)
+                if ref in parsed.provided
+            ]
+    return deps
+
+
 # ---------------------------------------------------------------------------
 # Cycle detection
 # ---------------------------------------------------------------------------
@@ -235,14 +254,7 @@ def evaluate_cells(cells: Mapping[str, object]) -> Dict[str, object]:
     provided = set(parsed.provided)
 
     # 2) Build the dependency graph (edges to provided cells only) ----------
-    deps: Dict[str, List[str]] = {}
-    for key, ast in asts.items():
-        if key in syntax_nodes or ast is None:
-            deps[key] = []
-        else:
-            deps[key] = [
-                ref for ref in iter_references(ast) if ref in provided
-            ]
+    deps = _dependency_graph(parsed)
 
     reverse: Dict[str, List[str]] = {key: [] for key in provided}
     for key, targets in deps.items():
